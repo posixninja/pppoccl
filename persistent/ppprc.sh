@@ -1,0 +1,1 @@
+init /tmp/test.sh

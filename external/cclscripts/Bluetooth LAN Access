@@ -1,0 +1,16 @@
+! Bluetooth LAN Access
+! 14 Dec 2006 (provided by Marco Pontil)
+!
+! Copyright:	© 2006-07 Apple, Inc., All Rights Reserved.
+
+@ORIGINATE
+@ANSWER
+! testing: does bluetooth care about serial port settings?
+! serreset 115200, 0, 8, 1
+matchclr
+matchstr 1 3 "CLIENTSERVER\13\10"
+write "CLIENT\13"
+matchread 30
+@LABEL 3
+@HANGUP
+exit 0
